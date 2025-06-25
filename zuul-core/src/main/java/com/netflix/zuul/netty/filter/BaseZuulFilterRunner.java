@@ -404,13 +404,13 @@ public abstract class BaseZuulFilterRunner<I extends ZuulMessage, O extends Zuul
 
     protected abstract void resume(O zuulMesg);
 
-    protected MethodBinding<?> methodBinding(ZuulMessage zuulMesg) {
+    protected MethodBinding<?> methodBinding() {
         return MethodBinding.NO_OP_BINDING;
     }
 
     protected void resumeInBindingContext(final O zuulMesg, final String filterName) {
         try {
-            methodBinding(zuulMesg).bind(() -> resume(zuulMesg));
+            methodBinding().bind(() -> resume(zuulMesg));
         } catch (Exception ex) {
             handleException(zuulMesg, filterName, ex);
         }
