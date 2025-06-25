@@ -19,7 +19,7 @@ package com.netflix.zuul.integration.server.filters;
 import com.netflix.zuul.Filter;
 import com.netflix.zuul.context.SessionContext;
 import com.netflix.zuul.filters.FilterType;
-import com.netflix.zuul.filters.endpoint.ProxyEndpoint;
+import com.netflix.zuul.netty.filter.ProxyChannelHandlerAdapter;
 import com.netflix.zuul.filters.http.HttpInboundSyncFilter;
 import com.netflix.zuul.message.http.HttpRequestMessage;
 
@@ -41,7 +41,7 @@ public class InboundRoutesFilter extends HttpInboundSyncFilter {
         // ByteBuf buffer = UnpooledByteBufAllocator.DEFAULT.buffer();
 
         SessionContext context = input.getContext();
-        context.setEndpoint(ProxyEndpoint.class.getCanonicalName());
+        context.setEndpoint(ProxyChannelHandlerAdapter.class.getCanonicalName());
         context.setRouteVIP("api");
         return input;
     }

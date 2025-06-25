@@ -30,7 +30,7 @@ import com.netflix.zuul.filters.FilterType;
 import com.netflix.zuul.filters.SyncZuulFilterAdapter;
 import com.netflix.zuul.filters.ZuulFilter;
 import com.netflix.zuul.filters.endpoint.MissingEndpointHandlingFilter;
-import com.netflix.zuul.filters.endpoint.ProxyEndpoint;
+import com.netflix.zuul.netty.filter.ProxyChannelHandlerAdapter;
 import com.netflix.zuul.message.ZuulMessage;
 import com.netflix.zuul.message.http.HttpRequestMessage;
 import com.netflix.zuul.message.http.HttpResponseMessage;
@@ -55,7 +55,7 @@ public class ZuulEndPointRunner extends BaseZuulFilterRunner<HttpRequestMessage,
     private final FilterLoader filterLoader;
 
     private static Logger logger = LoggerFactory.getLogger(ZuulEndPointRunner.class);
-    public static final String PROXY_ENDPOINT_FILTER_NAME = ProxyEndpoint.class.getCanonicalName();
+    public static final String PROXY_ENDPOINT_FILTER_NAME = ProxyChannelHandlerAdapter.class.getCanonicalName();
     public static final DynamicStringProperty DEFAULT_ERROR_ENDPOINT =
             new DynamicStringProperty("zuul.filters.error.default", "endpoint.ErrorResponse");
 
@@ -104,8 +104,8 @@ public class ZuulEndPointRunner extends BaseZuulFilterRunner<HttpRequestMessage,
             setEndpoint(zuulReq, endpoint);
             final HttpResponseMessage zuulResp = filter(endpoint, zuulReq);
 
-            if ((zuulResp != null) && (!(endpoint instanceof ProxyEndpoint))) {
-                // EdgeProxyEndpoint calls invokeNextStage internally
+            if ((zuulResp != null) && (!(endpoint instanceof ProxyChannelHandlerAdapter))) {
+                // ProxyChannelHandler calls invokeNextStage internally
                 logger.debug(
                         "Endpoint calling invokeNextStage, UUID {}",
                         zuulReq.getContext().getUUID());
@@ -154,7 +154,7 @@ public class ZuulEndPointRunner extends BaseZuulFilterRunner<HttpRequestMessage,
 
                 if (isFilterAwaitingBody(zuulReq.getContext())
                         && zuulReq.hasCompleteBody()
-                        && !(endpoint instanceof ProxyEndpoint)) {
+                        && !(endpoint instanceof ProxyChannelHandlerAdapter)) {
                     // whole body has arrived, resume filter chain
                     ByteBufUtil.touch(newChunk, "Endpoint body complete, resume chain, ZuulMessage: ", zuulReq);
                     invokeNextStage(filter(endpoint, zuulReq));
@@ -190,7 +190,7 @@ public class ZuulEndPointRunner extends BaseZuulFilterRunner<HttpRequestMessage,
         }
 
         if (PROXY_ENDPOINT_FILTER_NAME.equals(endpointName)) {
-            return newProxyEndpoint(zuulRequest);
+            return newProxyChannelHandlerAdapter(zuulRequest);
         }
 
         final Endpoint<HttpRequestMessage, HttpResponseMessage> filter = getEndpointFilter(endpointName);
@@ -202,14 +202,14 @@ public class ZuulEndPointRunner extends BaseZuulFilterRunner<HttpRequestMessage,
     }
 
     /**
-     * Override to inject your own proxy endpoint implementation
+     * Override to inject your own proxy channel handler implementation
      *
      * @param zuulRequest - the request message
-     * @return the proxy endpoint
+     * @return the proxy channel handler adapter
      */
-    protected ZuulFilter<HttpRequestMessage, HttpResponseMessage> newProxyEndpoint(HttpRequestMessage zuulRequest) {
-        return new ProxyEndpoint(
-                zuulRequest, getChannelHandlerContext(zuulRequest), getNextStage(), MethodBinding.NO_OP_BINDING);
+    protected ZuulFilter<HttpRequestMessage, HttpResponseMessage> newProxyChannelHandlerAdapter(HttpRequestMessage zuulRequest) {
+        return new ProxyChannelHandlerAdapter(
+                zuulRequest, getChannelHandlerContext(zuulRequest), (FilterRunner<HttpResponseMessage, HttpResponseMessage>) getNextStage());
     }
 
     protected <I extends ZuulMessage, O extends ZuulMessage> Endpoint<I, O> getEndpointFilter(String endpointName) {

@@ -19,10 +19,12 @@ package com.netflix.zuul.netty.server;
 import static com.netflix.netty.common.HttpLifecycleChannelHandler.CompleteEvent;
 import static com.netflix.netty.common.HttpLifecycleChannelHandler.CompleteReason;
 
+import com.netflix.zuul.context.CommonContextKeys;
 import com.netflix.zuul.exception.OutboundErrorType;
 import com.netflix.zuul.exception.OutboundException;
 import com.netflix.zuul.exception.ZuulException;
 import com.netflix.zuul.filters.endpoint.ProxyEndpoint;
+import com.netflix.zuul.netty.server.ProxyChannelHandler;
 import com.netflix.zuul.message.Header;
 import com.netflix.zuul.message.http.HttpQueryParams;
 import com.netflix.zuul.message.http.HttpRequestMessage;
@@ -56,6 +58,7 @@ import org.slf4j.LoggerFactory;
 public class OriginResponseReceiver extends ChannelDuplexHandler {
 
     private volatile ProxyEndpoint edgeProxy;
+    private volatile ProxyChannelHandler proxyChannelHandler;
 
     private static final Logger logger = LoggerFactory.getLogger(OriginResponseReceiver.class);
     private static final AttributeKey<Throwable> SSL_HANDSHAKE_UNSUCCESS_FROM_ORIGIN_THROWABLE =
@@ -68,8 +71,13 @@ public class OriginResponseReceiver extends ChannelDuplexHandler {
         this.edgeProxy = edgeProxy;
     }
 
+    public OriginResponseReceiver(final ProxyChannelHandler proxyChannelHandler) {
+        this.proxyChannelHandler = proxyChannelHandler;
+    }
+
     public void unlinkFromClientRequest() {
         edgeProxy = null;
+        proxyChannelHandler = null;
     }
 
     @Override
@@ -83,6 +91,8 @@ public class OriginResponseReceiver extends ChannelDuplexHandler {
         if (msg instanceof HttpResponse) {
             if (edgeProxy != null) {
                 edgeProxy.responseFromOrigin((HttpResponse) msg);
+            } else if (proxyChannelHandler != null) {
+                proxyChannelHandler.responseFromOrigin((HttpResponse) msg);
             } else if (ReferenceCountUtil.refCnt(msg) > 0) {
                 // this handles the case of a DefaultFullHttpResponse that could have content that needs to be released
                 ReferenceCountUtil.safeRelease(msg);
@@ -92,6 +102,15 @@ public class OriginResponseReceiver extends ChannelDuplexHandler {
             final HttpContent chunk = (HttpContent) msg;
             if (edgeProxy != null) {
                 edgeProxy.invokeNext(chunk);
+            } else if (proxyChannelHandler != null) {
+                // Get the server channel context from the proxy handler's context
+                ChannelHandlerContext serverCtx = (ChannelHandlerContext) proxyChannelHandler.getZuulRequest()
+                    .getContext().get(CommonContextKeys.NETTY_SERVER_CHANNEL_HANDLER_CONTEXT);
+                if (serverCtx != null) {
+                    proxyChannelHandler.invokeNext(serverCtx, chunk);
+                } else {
+                    ReferenceCountUtil.safeRelease(chunk);
+                }
             } else {
                 ReferenceCountUtil.safeRelease(chunk);
             }
@@ -102,6 +121,12 @@ public class OriginResponseReceiver extends ChannelDuplexHandler {
             final Exception error = new IllegalStateException("Received invalid message from origin");
             if (edgeProxy != null) {
                 edgeProxy.errorFromOrigin(error);
+            } else if (proxyChannelHandler != null) {
+                ChannelHandlerContext serverCtx = (ChannelHandlerContext) proxyChannelHandler.getZuulRequest()
+                    .getContext().get(CommonContextKeys.NETTY_SERVER_CHANNEL_HANDLER_CONTEXT);
+                if (serverCtx != null) {
+                    proxyChannelHandler.errorFromOrigin(serverCtx, error);
+                }
             }
             ctx.fireExceptionCaught(error);
         }
@@ -111,17 +136,34 @@ public class OriginResponseReceiver extends ChannelDuplexHandler {
     public void userEventTriggered(ChannelHandlerContext ctx, Object evt) throws Exception {
         if (evt instanceof CompleteEvent completeEvent) {
             final CompleteReason reason = completeEvent.getReason();
-            if ((reason != CompleteReason.SESSION_COMPLETE) && (edgeProxy != null)) {
+            if ((reason != CompleteReason.SESSION_COMPLETE) && (edgeProxy != null || proxyChannelHandler != null)) {
                 if(reason == CompleteReason.CLOSE && Boolean.TRUE.equals(ctx.channel().attr(SSL_CLOSE_NOTIFY_SEEN).get())) {
                     logger.warn("Origin request completed with close, after getting a SslCloseCompletionEvent event: {}", ChannelUtils.channelInfoForLogging(ctx.channel()));
-                    edgeProxy.errorFromOrigin(new OriginConnectException("Origin connection close_notify", OutboundErrorType.CLOSE_NOTIFY_CONNECTION));
+                    OriginConnectException ex = new OriginConnectException("Origin connection close_notify", OutboundErrorType.CLOSE_NOTIFY_CONNECTION);
+                    if (edgeProxy != null) {
+                        edgeProxy.errorFromOrigin(ex);
+                    } else if (proxyChannelHandler != null) {
+                        ChannelHandlerContext serverCtx = (ChannelHandlerContext) proxyChannelHandler.getZuulRequest()
+                            .getContext().get(CommonContextKeys.NETTY_SERVER_CHANNEL_HANDLER_CONTEXT);
+                        if (serverCtx != null) {
+                            proxyChannelHandler.errorFromOrigin(serverCtx, ex);
+                        }
+                    }
                 } else {
                     logger.error(
                             "Origin request completed with reason other than COMPLETE: {}, {}",
                             reason.name(),
                             ChannelUtils.channelInfoForLogging(ctx.channel()));
                     final ZuulException ze = new ZuulException("CompleteEvent", reason.name(), true);
-                    edgeProxy.errorFromOrigin(ze);
+                    if (edgeProxy != null) {
+                        edgeProxy.errorFromOrigin(ze);
+                    } else if (proxyChannelHandler != null) {
+                        ChannelHandlerContext serverCtx = (ChannelHandlerContext) proxyChannelHandler.getZuulRequest()
+                            .getContext().get(CommonContextKeys.NETTY_SERVER_CHANNEL_HANDLER_CONTEXT);
+                        if (serverCtx != null) {
+                            proxyChannelHandler.errorFromOrigin(serverCtx, ze);
+                        }
+                    }
                 }
             }
 
@@ -141,6 +183,15 @@ public class OriginResponseReceiver extends ChannelDuplexHandler {
                         "Origin request received IDLE event: {}", ChannelUtils.channelInfoForLogging(ctx.channel()));
                 edgeProxy.errorFromOrigin(
                         new OutboundException(OutboundErrorType.READ_TIMEOUT, edgeProxy.getRequestAttempts()));
+            } else if (proxyChannelHandler != null) {
+                logger.error(
+                        "Origin request received IDLE event: {}", ChannelUtils.channelInfoForLogging(ctx.channel()));
+                ChannelHandlerContext serverCtx = (ChannelHandlerContext) proxyChannelHandler.getZuulRequest()
+                    .getContext().get(CommonContextKeys.NETTY_SERVER_CHANNEL_HANDLER_CONTEXT);
+                if (serverCtx != null) {
+                    proxyChannelHandler.errorFromOrigin(serverCtx,
+                        new OutboundException(OutboundErrorType.READ_TIMEOUT, proxyChannelHandler.getRequestAttempts()));
+                }
             }
             super.userEventTriggered(ctx, evt);
         } else if(evt instanceof SslCloseCompletionEvent) {
@@ -263,6 +314,15 @@ public class OriginResponseReceiver extends ChannelDuplexHandler {
             edgeProxy = null;
             errMesg += ep.getOrigin().getName();
             ep.errorFromOrigin(cause);
+        } else if (proxyChannelHandler != null) {
+            final ProxyChannelHandler handler = proxyChannelHandler;
+            proxyChannelHandler = null;
+            errMesg += handler.getOrigin().getName();
+            ChannelHandlerContext serverCtx = (ChannelHandlerContext) handler.getZuulRequest()
+                .getContext().get(CommonContextKeys.NETTY_SERVER_CHANNEL_HANDLER_CONTEXT);
+            if (serverCtx != null) {
+                handler.errorFromOrigin(serverCtx, cause);
+            }
         }
         ctx.fireExceptionCaught(new ZuulException(cause, errMesg, true));
     }
@@ -282,6 +342,23 @@ public class OriginResponseReceiver extends ChannelDuplexHandler {
                 logger.error("Error from Origin connection:", cause);
             }
             edgeProxy.errorFromOrigin(cause);
+        } else if (proxyChannelHandler != null) {
+            if (cause instanceof ReadTimeoutException) {
+                proxyChannelHandler.getPassport().add(PassportState.ORIGIN_CH_READ_TIMEOUT);
+                logger.debug(
+                        "read timeout on origin channel {} ", ChannelUtils.channelInfoForLogging(ctx.channel()), cause);
+            } else if (cause instanceof IOException) {
+                proxyChannelHandler.getPassport().add(PassportState.ORIGIN_CH_IO_EX);
+                logger.debug(
+                        "I/O error on origin channel {} ", ChannelUtils.channelInfoForLogging(ctx.channel()), cause);
+            } else {
+                logger.error("Error from Origin connection:", cause);
+            }
+            ChannelHandlerContext serverCtx = (ChannelHandlerContext) proxyChannelHandler.getZuulRequest()
+                .getContext().get(CommonContextKeys.NETTY_SERVER_CHANNEL_HANDLER_CONTEXT);
+            if (serverCtx != null) {
+                proxyChannelHandler.errorFromOrigin(serverCtx, cause);
+            }
         }
         ctx.fireExceptionCaught(cause);
     }
@@ -293,6 +370,15 @@ public class OriginResponseReceiver extends ChannelDuplexHandler {
             OriginConnectException ex =
                     new OriginConnectException("Origin server inactive", OutboundErrorType.RESET_CONNECTION);
             edgeProxy.errorFromOrigin(ex);
+        } else if (proxyChannelHandler != null) {
+            logger.debug("Origin channel inactive. channel-info={}", ChannelUtils.channelInfoForLogging(ctx.channel()));
+            OriginConnectException ex =
+                    new OriginConnectException("Origin server inactive", OutboundErrorType.RESET_CONNECTION);
+            ChannelHandlerContext serverCtx = (ChannelHandlerContext) proxyChannelHandler.getZuulRequest()
+                .getContext().get(CommonContextKeys.NETTY_SERVER_CHANNEL_HANDLER_CONTEXT);
+            if (serverCtx != null) {
+                proxyChannelHandler.errorFromOrigin(serverCtx, ex);
+            }
         }
         super.channelInactive(ctx);
         ctx.close();

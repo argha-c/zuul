@@ -1130,7 +1130,7 @@ public class ProxyChannelHandler extends ChannelDuplexHandler implements Generic
         private final ProxyChannelHandler proxyHandler;
 
         public ProxyOriginResponseReceiver(ProxyChannelHandler proxyHandler) {
-            super(null); // Pass null since we override the methods
+            super(proxyHandler); // Pass the ProxyChannelHandler to the constructor
             this.proxyHandler = proxyHandler;
         }
 
